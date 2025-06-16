@@ -1,8 +1,8 @@
 # Import the Pinecone library
 from pinecone import Pinecone
+import os
 
-# Initialize a Pinecone client with your API key
-pc = Pinecone(api_key="pcsk_3UQjbP_CmGxVJFcUvPuz25jWB2gYJHAVEwtMTUaXV58rbokW4CYeQBjCVTcX912oEebK4k")
+pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
 # Create a dense index with integrated embedding
 index_name = "quickstart-demo-py"
