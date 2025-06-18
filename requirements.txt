@@ -1,0 +1,13 @@
+certifi==2025.4.26
+charset-normalizer==3.4.2
+idna==3.10
+packaging==24.2
+pinecone==7.0.2
+pinecone-plugin-assistant==1.6.1
+pinecone-plugin-interface==0.0.7
+python-dateutil==2.9.0.post0
+python-dotenv==1.1.0
+requests==2.32.4
+six==1.17.0
+typing_extensions==4.14.0
+urllib3==2.4.0
