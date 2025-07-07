@@ -29,7 +29,7 @@ pc = Pinecone(api_key=pc_key)
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 llm = init_chat_model("gpt-4o-mini", model_provider="openai")
 index_name = "ibero-langagent-index"
-# namespace has to be the same as the name of the .csv file
+# namespace has to be the same as the name of the .csv file and the name has to keep a consistency with the contents of the table
 namespaces = ["teachers"]
 csv_folder = "development"
 
