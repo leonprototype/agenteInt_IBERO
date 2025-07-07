@@ -1,34 +1,33 @@
+# utils.py
+
 import csv
+from langchain_community.document_loaders.csv_loader import CSVLoader
+from langchain.schema import Document
+import unicodedata
 
-def load_teachers(filepath="./development/teachers.csv"):
-    teachers = []
-    with open(filepath, encoding='utf-8') as csvfile:
-        reader = csv.DictReader(csvfile)
+
+# 1️⃣ Load CSV as Documents for LangChain
+
+
+def strip_accents(s: str) -> str:
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', s)
+        if unicodedata.category(c) != 'Mn'
+    )
+
+
+def load_csv_documents(csv_path: str) -> list[Document]:
+    clean_rows = []
+    with open(csv_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
         for row in reader:
-            teachers.append({
-                "id": row["id"],
-                "name": row["name"],
-                "office": row["office"] if row["office"] else False,
-                "position": row["position"],
-                "background": row["background"],
-                "info": row["info"]
-            })
-    return teachers
+            clean_row = {k: strip_accents(v) for k, v in row.items()}
+            clean_rows.append(clean_row)
 
-
-def prepare_teacher_vectors(teachers, embed_model):
-    vectors = []
-    for teacher in teachers:
-        vector = embed_model.encode(teacher["info"]).tolist()
-        vectors.append({
-            "id": teacher["id"],
-            "values": vector,
-            "metadata": {
-                "name": teacher["name"],
-                "office": teacher["office"],
-                "position": teacher["position"],
-                "background": teacher["background"],
-                "info": teacher["info"]
-            }
-        })
-    return vectors
+    docs = []
+    for row in clean_rows:
+        content = "\n".join(f"{k}: {row[k]}" for k in [
+                            "name", "background", "info"])
+        metadata = {k: row[k] for k in ["id", "office", "position"]}
+        docs.append(Document(page_content=content, metadata=metadata))
+    return docs
