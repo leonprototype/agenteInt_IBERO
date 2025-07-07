@@ -10,6 +10,7 @@ from utils import *
 from langchain_core.documents import Document
 from typing_extensions import List, TypedDict
 from langgraph.graph import START, StateGraph
+from langchain_core.prompts import PromptTemplate
 
 # Load environment variables
 load_dotenv()
@@ -58,12 +59,43 @@ for namespace in namespaces:
         else:
             print(f"CSV not found for namespace {namespace}")
 
-prompt = hub.pull("rlm/rag-prompt")
+# Define prompt Template
+
+namespace_chooser = """
+You have access to the following namespaces:
+
+{namespace_list}
+
+Given this question:
+{question}
+
+Decide which namespace your answer should be based on.
+Output ONLY the namespace name exactly as one from the list.
+"""
+
+chooser_prompt = PromptTemplate.from_template(
+    namespace_chooser,
+    partial_variables={"namespace_list": ", ".join(namespaces)}
+)
+
+base_template = """You are an assistant for question-answering tasks. 
+Use the following pieces of retrieved context to answer the question. If you don't know the answer, 
+just say that you don't know. Use three sentences maximum and keep the answer concise.
+
+
+{context}
+
+Question: {question}
+
+Answer:"""
+
+prompt = PromptTemplate.from_template(base_template)
 
 # Define state for application
 
 
 class State(TypedDict):
+    namespace: str
     question: str
     context: List[Document]
     answer: str
@@ -71,9 +103,19 @@ class State(TypedDict):
 # Define application steps
 
 
+def choose_namespace(state: State):
+    # Call LLM to pick namespace
+    msg = chooser_prompt.invoke({"question": state["question"]})
+    chosen_namespace = llm.invoke(msg).content.strip()
+    if chosen_namespace not in namespaces:
+        chosen_namespace = namespaces[0]  # fallback
+    return {"namespace": chosen_namespace}
+
+
 def retrieve(state: State):
+    name_space = state["namespace"]
     retrieved_docs = vector_store.similarity_search(
-        state["question"], k=3, namespace="teachers")
+        state["question"], k=3, namespace=state["namespace"])
     return {"context": retrieved_docs}
 
 
@@ -85,8 +127,9 @@ def generate(state: State):
     return {"answer": response.content}
 
 
-graph_builder = StateGraph(State).add_sequence([retrieve, generate])
-graph_builder.add_edge(START, "retrieve")
+graph_builder = StateGraph(State).add_sequence(
+    [choose_namespace, retrieve, generate])
+graph_builder.add_edge(START, "choose_namespace")
 graph = graph_builder.compile()
 
 query = input("Escribe tu pregunta:")
