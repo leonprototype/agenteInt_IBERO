@@ -1,5 +1,8 @@
 import os
 import getpass
+import streamlit as st
+import random
+import time
 from dotenv import load_dotenv
 from pinecone import Pinecone, ServerlessSpec
 from langchain.chat_models import init_chat_model
@@ -9,8 +12,13 @@ from langchain import hub
 from utils import *
 from langchain_core.documents import Document
 from typing_extensions import List, TypedDict
-from langgraph.graph import START, StateGraph
+from langgraph.graph import START, StateGraph, MessagesState, END
 from langchain_core.prompts import PromptTemplate
+from langchain_core.tools import tool
+from langchain_core.messages import SystemMessage
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import create_react_agent
 
 # Load environment variables
 load_dotenv()
@@ -78,8 +86,8 @@ chooser_prompt = PromptTemplate.from_template(
     partial_variables={"namespace_list": ", ".join(namespaces)}
 )
 
-base_template = """You are an assistant for question-answering tasks. 
-Use the following pieces of retrieved context to answer the question. If you don't know the answer, 
+base_template = """You are an assistant for question-answering tasks.
+Use the following pieces of retrieved context to answer the question. If you don't know the answer,
 just say that you don't know. Use three sentences maximum and keep the answer concise.
 
 
@@ -89,59 +97,146 @@ Question: {question}
 
 Answer:"""
 
-prompt = PromptTemplate.from_template(base_template)
-
-# Define state for application
-
-
-class State(TypedDict):
-    namespace: str
-    question: str
-    context: List[Document]
-    answer: str
+query = PromptTemplate.from_template(base_template)
 
 # Define application steps
 
 
-def choose_namespace(state: State):
-    # Call LLM to pick namespace
-    msg = chooser_prompt.invoke({"question": state["question"]})
+@tool(response_format="content_and_artifact")
+def retrieve(query: str):
+    """Retrieve information related to a query."""
+    msg = chooser_prompt.invoke({"question": query})
     chosen_namespace = llm.invoke(msg).content.strip()
     if chosen_namespace not in namespaces:
-        chosen_namespace = namespaces[0]  # fallback
-    return {"namespace": chosen_namespace}
-
-
-def retrieve(state: State):
-    name_space = state["namespace"]
+        return f"No index namespace found for {chosen_namespace}"
     retrieved_docs = vector_store.similarity_search(
-        state["question"], k=3, namespace=state["namespace"])
-    return {"context": retrieved_docs}
+        query, k=3, namespace=chosen_namespace)
+    serialized = "\n\n".join(
+        (f"Source: {doc.metadata}\n" f"Content: {doc.page_content}")
+        for doc in retrieved_docs
+    )
+    return serialized, retrieved_docs
 
 
-def generate(state: State):
-    docs_content = "\n\n".join(doc.page_content for doc in state["context"])
-    messages = prompt.invoke(
-        {"question": state["question"], "context": docs_content})
-    response = llm.invoke(messages)
-    return {"answer": response.content}
+# Step 1: Generate an AIMessage that may include a tool-call to be sent.
+def query_or_respond(state: MessagesState):
+    """Generate tool call for retrieval or respond."""
+    llm_with_tools = llm.bind_tools([retrieve])
+    response = llm_with_tools.invoke(state["messages"])
+    # MessagesState appends messages to state instead of overwriting
+    return {"messages": [response]}
 
 
-graph_builder = StateGraph(State).add_sequence(
-    [choose_namespace, retrieve, generate])
-graph_builder.add_edge(START, "choose_namespace")
-graph = graph_builder.compile()
+# Step 2: Execute the retrieval.
+tools = ToolNode([retrieve])
 
-query = input("Escribe tu pregunta:")
+# Step 3: Generate a response using the retrieved content.
 
-result = graph.invoke({"question": query})
 
-print(f'Answer: {result["answer"]}')
+def generate(state: MessagesState):
+    """Generate answer."""
+    # Get generated ToolMessages
+    recent_tool_messages = []
+    for message in reversed(state["messages"]):
+        if message.type == "tool":
+            recent_tool_messages.append(message)
+        else:
+            break
+    tool_messages = recent_tool_messages[::-1]
 
-# retrieved_docs = vector_store.similarity_search(
-#     query, k=3, namespace="teachers")
-# docs_content = "\n\n".join(doc.page_content for doc in retrieved_docs)
-# prompt = prompt.invoke({"question": query, "context": docs_content})
-# answer = llm.invoke(prompt)
+    # Format into prompt
+    docs_content = "\n\n".join(doc.content for doc in tool_messages)
+    system_message_content = (
+        "You are an assistant for question-answering tasks. "
+        "Use the following pieces of retrieved context to answer "
+        "the question. If you don't know the answer, say that you "
+        "don't know. Use three sentences maximum and keep the "
+        "answer concise."
+        "\n\n"
+        f"{docs_content}"
+    )
+    conversation_messages = [
+        message
+        for message in state["messages"]
+        if message.type in ("human", "system")
+        or (message.type == "ai" and not message.tool_calls)
+    ]
+    prompt = [SystemMessage(system_message_content)] + conversation_messages
 
-# print(answer.content)
+    # Run
+    response = llm.invoke(prompt)
+    return {"messages": [response]}
+
+
+# graph_builder = StateGraph(MessagesState)
+
+# graph_builder.add_node(query_or_respond)
+# graph_builder.add_node(tools)
+# graph_builder.add_node(generate)
+
+# graph_builder.set_entry_point("query_or_respond")
+# graph_builder.add_conditional_edges(
+#     "query_or_respond",
+#     tools_condition,
+#     {END: END, "tools": "tools"},
+# )
+# graph_builder.add_edge("tools", "generate")
+# graph_builder.add_edge("generate", END)
+
+# graph = graph_builder.compile(checkpointer=MemorySaver())
+agent_executor = create_react_agent(
+    llm, [retrieve], checkpointer=MemorySaver())
+
+# while (True):
+#     try:
+#         query = input("\n\nEscribe tu pregunta:")
+#         for step in agent_executor.stream(
+#             {"messages": [{"role": "user", "content": query}]},
+#             stream_mode="values",
+#             config={"configurable": {"thread_id": "test123"}},
+#         ):
+#             step["messages"][-1].pretty_print()
+#     except KeyboardInterrupt:
+#         print("\nLoop detenido por el usuario.")
+#         break
+
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Let's start chatting! 👇"}]
+
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Accept user input
+if query := st.chat_input("What is up?"):
+    # Add user message to chat history
+    st.session_state.messages.append({"role": "user", "content": query})
+    for step in agent_executor.stream(
+        {"messages": [{"role": "user", "content": query}]},
+        stream_mode="values",
+        config={"configurable": {"thread_id": "test123"}},
+    ):
+        # Display user message in chat message container
+        if step["messages"][-1].type == "human":
+            with st.chat_message("user"):
+                st.markdown(query)
+
+        if step["messages"][-1].type == "ai":
+            # Display assistant response in chat message container
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                full_response = ""
+                assistant_response = step["messages"][-1].content
+        # Simulate stream of response with milliseconds delay
+            for chunk in assistant_response.split():
+                full_response += chunk + " "
+                time.sleep(0.05)
+                # Add a blinking cursor to simulate typing
+                message_placeholder.markdown(full_response + "▌")
+            message_placeholder.markdown(full_response)
+            # Add assistant response to chat history
+            st.session_state.messages.append(
+                {"role": "assistant", "content": full_response})
